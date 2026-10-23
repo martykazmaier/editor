@@ -1,0 +1,6 @@
+EleEdit 0.1.0 for EleBBS
+32-bit Windows ANSI message editor
+Reads and writes EleBBS message body
+Windows x86; Linux x86, x64, ARM64
+Linux socket transport is not supported
+Q Public License version 1.0
