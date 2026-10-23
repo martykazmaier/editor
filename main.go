@@ -66,8 +66,10 @@ type inputEvent struct {
 }
 
 type keyReader struct {
-	input  chan inputEvent
-	writer io.Writer
+	input      chan inputEvent
+	writer     io.Writer
+	pending    byte
+	hasPending bool
 }
 
 func newKeyReader(conn stream) *keyReader {
@@ -89,6 +91,10 @@ func newKeyReader(conn stream) *keyReader {
 }
 
 func (r *keyReader) nextByte(wait time.Duration) (byte, error) {
+	if r.hasPending {
+		r.hasPending = false
+		return r.pending, nil
+	}
 	if wait <= 0 {
 		event := <-r.input
 		return event.b, event.err
@@ -115,7 +121,9 @@ func (r *keyReader) readKey() (key, byte, error) {
 			return keyEscape, 0, nil
 		}
 		if first != '[' && first != 'O' {
-			return keyEscape, first, nil
+			r.pending = first
+			r.hasPending = true
+			return keyEscape, 0, nil
 		}
 		sequence := []byte{first}
 		for len(sequence) < 12 {
@@ -232,18 +240,21 @@ func decodeSequence(sequence []byte) key {
 		return keyLeft
 	case 'H':
 		return keyHome
+	case 'K':
+		return keyEnd
 	case 'F':
 		return keyEnd
 	case '~':
-		switch string(sequence[1 : len(sequence)-1]) {
+		parameters, _, _ := strings.Cut(string(sequence[1:len(sequence)-1]), ";")
+		switch parameters {
 		case "1", "7":
 			return keyHome
+		case "4", "8":
+			return keyEnd
 		case "2":
 			return keyInsert
 		case "3":
 			return keyDelete
-		case "4", "8":
-			return keyEnd
 		case "5":
 			return keyPageUp
 		case "6":
@@ -370,7 +381,7 @@ func (e *editor) render() error {
 		fmt.Fprint(&b, "\x1b[K")
 	}
 	fmt.Fprintf(&b, "\x1b[%d;1H\x1b[7m Line %4d/%-4d  Col %2d  %s  %-45.45s \x1b[K\x1b[0m", screenRows-1, e.y+1, len(e.lines), e.x+1, modeName(e.overtype), cleanDisplay(e.status))
-	fmt.Fprintf(&b, "\x1b[%d;1H F2 Save  F3 Quote  /s Save  /q Quote  /a Abort  Ctrl-Y Delete line\x1b[K", screenRows)
+	fmt.Fprintf(&b, "\x1b[%d;1H /s Save  /q Quote  /a Abort  Ctrl-Y Delete line\x1b[K", screenRows)
 	row := bodyStartRow + e.y - e.top
 	fmt.Fprintf(&b, "\x1b[%d;%dH\x1b[?25h", row, min(e.x+1, screenCols))
 	_, err := io.WriteString(e.conn, b.String())
@@ -427,7 +438,7 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 	case keyEscape, keyQuit:
 		return e.quitPrompt()
 	case keyAbort:
-		return true, nil
+		return true, e.discard()
 	case keyUp:
 		if e.y > 0 {
 			e.y--
@@ -437,6 +448,12 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 		if e.y < len(e.lines)-1 {
 			e.y++
 			e.clampX()
+		} else if len(e.lines) < maxLines {
+			e.lines = append(e.lines, "")
+			e.y++
+			e.x = 0
+		} else {
+			e.status = "Maximum line count reached"
 		}
 	case keyLeft:
 		if e.x > 0 {
@@ -498,7 +515,7 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 			e.insertQuote()
 			return false, nil
 		case "/a":
-			return true, nil
+			return true, e.discard()
 		}
 		if len(e.lines) >= maxLines {
 			e.status = "Maximum line count reached"
@@ -522,7 +539,11 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 	case keyDeleteLine:
 		e.removeCurrentLine()
 	case keyOther:
-		if value >= 32 && value != 127 && len(line) < screenCols-1 {
+		if value >= 32 && value != 127 {
+			if !e.overtype && len(line) >= screenCols-1 && len(e.lines) >= maxLines {
+				e.status = "Maximum line count reached"
+				break
+			}
 			if e.overtype && e.x < len(line) {
 				line[e.x] = value
 			} else {
@@ -532,9 +553,34 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 			}
 			e.lines[e.y] = string(line)
 			e.x++
+			if len(line) >= screenCols && !e.overtype {
+				e.wrapCurrentLine(line)
+			}
 		}
 	}
 	return false, nil
+}
+
+func (e *editor) wrapCurrentLine(line []byte) {
+	breakAt := screenCols - 1
+	for index := breakAt; index > 0; index-- {
+		if line[index] == ' ' {
+			breakAt = index
+			break
+		}
+	}
+	nextStart := breakAt
+	if line[breakAt] == ' ' {
+		nextStart++
+	}
+	e.lines[e.y] = string(line[:breakAt])
+	e.lines = append(e.lines, "")
+	copy(e.lines[e.y+2:], e.lines[e.y+1:])
+	e.lines[e.y+1] = string(line[nextStart:])
+	if e.x > breakAt {
+		e.y++
+		e.x -= nextStart
+	}
 }
 
 func (e *editor) quitPrompt() (bool, error) {
@@ -553,9 +599,20 @@ func (e *editor) quitPrompt() (bool, error) {
 		return true, nil
 	}
 	if choice == keyOther && (value == 'n' || value == 'N') {
+		if err := e.discard(); err != nil {
+			e.status = "Discard failed: " + err.Error()
+			return false, nil
+		}
 		return true, nil
 	}
 	return false, nil
+}
+
+func (e *editor) discard() error {
+	if err := os.Remove(bodyFile); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (e *editor) save() error {

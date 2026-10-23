@@ -42,10 +42,13 @@ func TestRenderDisplaysHeaderAndVisibleCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"From:      Morgan", "To:        Sysop", "Subject:   Test", "Message #: 42", "Area:      General", "Private:   NO", "\x1b[7ma\x1b[0m", "\x1b[6;1H\x1b[?25h"} {
+	for _, want := range []string{"From:      Morgan", "To:        Sysop", "Subject:   Test", "Message #: 42", "Area:      General", "Private:   NO", "\x1b[7ma\x1b[0m", "\x1b[6;1H\x1b[?25h", "/s Save  /q Quote  /a Abort  Ctrl-Y Delete line"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("render output missing %q", want)
 		}
+	}
+	if strings.Contains(text, "F2 Save") || strings.Contains(text, "F3 Quote") {
+		t.Error("render output advertises function keys")
 	}
 	if !strings.Contains(text, "\x1b[2;1H") || !strings.Contains(text, "\x1b[3;1H") || !strings.Contains(text, "\x1b[4;1H") {
 		t.Fatalf("expected paired headers to occupy adjacent rows; render output was %q", text)
@@ -83,7 +86,11 @@ func TestDecodeSequence(t *testing.T) {
 		want     key
 	}{
 		{[]byte{'[', 'A'}, keyUp},
+		{[]byte{'[', 'K'}, keyEnd},
 		{[]byte{'[', '1', '~'}, keyHome},
+		{[]byte{'[', '4', '~'}, keyEnd},
+		{[]byte{'[', '8', '~'}, keyEnd},
+		{[]byte{'[', '4', ';', '1', '~'}, keyEnd},
 		{[]byte{'[', '3', '~'}, keyDelete},
 		{[]byte{'[', '1', '2', '~'}, keyF2},
 		{[]byte{'O', 'R'}, keyF3},
@@ -116,6 +123,18 @@ func TestEditorSplitAndJoinLines(t *testing.T) {
 	}
 }
 
+func TestEditorEndAndDownPastLastLine(t *testing.T) {
+	e := &editor{lines: []string{"last line"}}
+	e.handle(keyEnd, 0)
+	if e.x != len(e.lines[0]) {
+		t.Fatalf("End cursor column = %d, want %d", e.x, len(e.lines[0]))
+	}
+	e.handle(keyDown, 0)
+	if !reflect.DeepEqual(e.lines, []string{"last line", ""}) || e.y != 1 || e.x != 0 {
+		t.Fatalf("Down past last line: lines=%#v cursor=(%d, %d)", e.lines, e.y, e.x)
+	}
+}
+
 func TestEditorInsertAndOvertype(t *testing.T) {
 	e := &editor{lines: []string{"cat"}, x: 1}
 	e.handle(keyOther, 'a')
@@ -126,6 +145,42 @@ func TestEditorInsertAndOvertype(t *testing.T) {
 	e.handle(keyOther, 'r')
 	if e.lines[0] != "cart" {
 		t.Fatalf("overtype mode produced %q", e.lines[0])
+	}
+}
+
+func TestEditorWrapsAtWordBoundary(t *testing.T) {
+	first := strings.Repeat("a", screenCols-6) + " " + "word"
+	e := &editor{lines: []string{first}, x: len(first)}
+	e.handle(keyOther, 's')
+	if !reflect.DeepEqual(e.lines, []string{strings.Repeat("a", screenCols-6), "words"}) {
+		t.Fatalf("wrapped lines = %#v", e.lines)
+	}
+	if e.y != 1 || e.x != 5 {
+		t.Fatalf("wrapped cursor = (%d, %d), want (1, 5)", e.y, e.x)
+	}
+}
+
+func TestEditorHardWrapsLongWords(t *testing.T) {
+	e := &editor{lines: []string{strings.Repeat("a", screenCols-1)}, x: screenCols - 1}
+	e.handle(keyOther, 'b')
+	if !reflect.DeepEqual(e.lines, []string{strings.Repeat("a", screenCols-1), "b"}) {
+		t.Fatalf("hard-wrapped lines = %#v", e.lines)
+	}
+	if e.y != 1 || e.x != 1 {
+		t.Fatalf("wrapped cursor = (%d, %d), want (1, 1)", e.y, e.x)
+	}
+}
+
+func TestEditorDoesNotLoseTextWhenWrapLimitIsReached(t *testing.T) {
+	lines := make([]string, maxLines)
+	lines[maxLines-1] = strings.Repeat("a", screenCols-1)
+	e := &editor{lines: lines, y: maxLines - 1, x: screenCols - 1}
+	e.handle(keyOther, 'b')
+	if e.lines[maxLines-1] != strings.Repeat("a", screenCols-1) {
+		t.Fatalf("line at limit changed to %q", e.lines[maxLines-1])
+	}
+	if e.status != "Maximum line count reached" {
+		t.Fatalf("status = %q, want maximum line count warning", e.status)
 	}
 }
 
@@ -153,6 +208,19 @@ func TestKeyReaderArrowSequences(t *testing.T) {
 		got, _, err := reader.readKey()
 		if err != nil || got != want {
 			t.Fatalf("readKey() = %v, %v; want %v", got, err, want)
+		}
+	}
+}
+
+func TestKeyReaderEndSequence(t *testing.T) {
+	for _, sequence := range [][]byte{{0x1b, '[', '4', ';', '1', '~'}, {0x1b, '[', 'K'}} {
+		reader := &keyReader{input: make(chan inputEvent, len(sequence))}
+		for _, value := range sequence {
+			reader.input <- inputEvent{b: value}
+		}
+		got, _, err := reader.readKey()
+		if err != nil || got != keyEnd {
+			t.Errorf("readKey(%q) = %v, %v; want End", sequence, got, err)
 		}
 	}
 }
@@ -249,8 +317,38 @@ func TestSlashCommands(t *testing.T) {
 		t.Fatalf("/s saved %#v, err %v", got, err)
 	}
 
-	abort := &editor{lines: []string{"/a"}}
+	abort := &editor{lines: []string{"changed body"}}
+	if err := abort.save(); err != nil {
+		t.Fatal(err)
+	}
+	abort.lines = []string{"/a"}
 	if quit, err := abort.handle(keyEnter, 0); err != nil || !quit {
 		t.Fatalf("/a result = quit %v, err %v", quit, err)
+	}
+	if _, err := os.Stat(bodyFile); !os.IsNotExist(err) {
+		t.Fatalf("/a left msgtmp present, stat err %v", err)
+	}
+
+	escape := &editor{
+		conn:   &bytes.Buffer{},
+		lines:  []string{"saved during session"},
+		reader: &keyReader{input: make(chan inputEvent, 3)},
+	}
+	if err := escape.save(); err != nil {
+		t.Fatal(err)
+	}
+	escape.lines = []string{"unsaved change"}
+	for _, value := range []byte{0x1b, 'N', 'X'} {
+		escape.reader.input <- inputEvent{b: value}
+	}
+	action, choice, err := escape.reader.readKey()
+	if err != nil || action != keyEscape {
+		t.Fatalf("Escape input = %v, %v; want Escape", action, err)
+	}
+	if quit, err := escape.handle(action, choice); err != nil || !quit {
+		t.Fatalf("Escape then N result = quit %v, err %v", quit, err)
+	}
+	if _, err := os.Stat(bodyFile); !os.IsNotExist(err) {
+		t.Fatalf("Escape-N left msgtmp present, stat err %v", err)
 	}
 }
