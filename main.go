@@ -10,11 +10,12 @@ import (
 )
 
 const (
-	screenCols = 80
-	screenRows = 24
-	bodyRows   = 19
-	maxLines   = 1000
-	quotePath  = "msgquote"
+	screenCols        = 80
+	screenRows        = 24
+	bodyRows          = 19
+	maxLines          = 1000
+	maxSignatureLines = 12
+	quotePath         = "msgquote"
 )
 
 type stream interface {
@@ -23,16 +24,17 @@ type stream interface {
 }
 
 type editor struct {
-	conn     stream
-	reader   *keyReader
-	header   headers
-	lines    []string
-	cfg      config
-	x        int
-	y        int
-	top      int
-	status   string
-	overtype bool
+	conn       stream
+	reader     *keyReader
+	header     headers
+	lines      []string
+	cfg        config
+	configPath string
+	x          int
+	y          int
+	top        int
+	status     string
+	overtype   bool
 }
 
 type key int
@@ -284,13 +286,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	cfg, err := loadConfig(defaultConfigPath)
-	if err != nil {
-		return reportSocketError(conn, fmt.Errorf("read config: %w", err))
-	}
 	header, err := readHeaders(headerFile)
 	if err != nil {
 		return reportSocketError(conn, fmt.Errorf("read headers: %w", err))
+	}
+	configPath := configPathForUser(header.From)
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return reportSocketError(conn, fmt.Errorf("read config: %w", err))
 	}
 	lines, err := readBody(bodyFile)
 	if err != nil {
@@ -302,7 +305,7 @@ func run() error {
 	if len(lines) == 0 {
 		lines = []string{""}
 	}
-	e := &editor{conn: conn, reader: newKeyReader(conn), header: header, lines: lines, cfg: cfg, status: "Ready"}
+	e := &editor{conn: conn, reader: newKeyReader(conn), header: header, lines: lines, cfg: cfg, configPath: configPath, status: "Ready"}
 	return e.run()
 }
 
@@ -381,7 +384,7 @@ func (e *editor) render() error {
 		fmt.Fprint(&b, "\x1b[K")
 	}
 	fmt.Fprintf(&b, "\x1b[%d;1H\x1b[7m Line %4d/%-4d  Col %2d  %s  %-45.45s \x1b[K\x1b[0m", screenRows-1, e.y+1, len(e.lines), e.x+1, modeName(e.overtype), cleanDisplay(e.status))
-	fmt.Fprintf(&b, "\x1b[%d;1H /s Save  /q Quote  /a Abort  Ctrl-Y Delete line\x1b[K", screenRows)
+	fmt.Fprintf(&b, "\x1b[%d;1H /s Save  /q Quote  /p Preferences  /a Abort  Ctrl-Y Delete line\x1b[K", screenRows)
 	row := bodyStartRow + e.y - e.top
 	fmt.Fprintf(&b, "\x1b[%d;%dH\x1b[?25h", row, min(e.x+1, screenCols))
 	_, err := io.WriteString(e.conn, b.String())
@@ -514,6 +517,10 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 			e.lines[e.y], e.x = "", 0
 			e.insertQuote()
 			return false, nil
+		case "/p":
+			e.removeCurrentLine()
+			e.configure()
+			return false, nil
 		case "/a":
 			return true, e.discard()
 		}
@@ -617,6 +624,228 @@ func (e *editor) discard() error {
 
 func (e *editor) save() error {
 	return writeBody(bodyFile, e.cfg.appendSignature(e.lines))
+}
+
+func (e *editor) configure() {
+	if strings.TrimSpace(e.header.From) == "" {
+		e.status = "Cannot save preferences without a user name"
+		return
+	}
+	updated := e.cfg
+	var accepted bool
+	var err error
+	var value string
+
+	if value, accepted, err = e.promptSetting("Quote prefix", updated.Quote.Prefix); err != nil {
+		e.status = "Preference input failed"
+		return
+	} else if !accepted {
+		e.status = "Preferences unchanged"
+		return
+	}
+	updated.Quote.Prefix = value
+	if updated.Quote.Strip, accepted, err = e.promptBoolean("Strip quote prefix", updated.Quote.Strip); err != nil {
+		e.status = "Preference input failed"
+		return
+	} else if !accepted {
+		e.status = "Preferences unchanged"
+		return
+	}
+	if updated.Quote.QuoteAll, accepted, err = e.promptBoolean("Prefix all quoted lines", updated.Quote.QuoteAll); err != nil {
+		e.status = "Preference input failed"
+		return
+	} else if !accepted {
+		e.status = "Preferences unchanged"
+		return
+	}
+	if value, accepted, err = e.editSignature(updated.Signature.Text); err != nil {
+		e.status = "Preference input failed"
+		return
+	} else if !accepted {
+		e.status = "Preferences unchanged"
+		return
+	}
+	updated.Signature.Text = value
+	if updated.Signature.Append, accepted, err = e.promptBoolean("Append signature on save", updated.Signature.Append); err != nil {
+		e.status = "Preference input failed"
+		return
+	} else if !accepted {
+		e.status = "Preferences unchanged"
+		return
+	}
+	if err := saveConfig(e.configPath, updated); err != nil {
+		e.status = "Preferences not saved: " + err.Error()
+		return
+	}
+	e.cfg = updated
+	e.status = "Preferences saved"
+}
+
+func (e *editor) promptBoolean(label string, current bool) (bool, bool, error) {
+	value := boolSetting(current)
+	for {
+		input, accepted, err := e.promptSetting(label+" (yes/no)", value)
+		if err != nil || !accepted {
+			return current, accepted, err
+		}
+		switch strings.ToLower(strings.TrimSpace(input)) {
+		case "yes", "y", "true", "1":
+			return true, true, nil
+		case "no", "n", "false", "0":
+			return false, true, nil
+		default:
+			value = input
+		}
+	}
+}
+
+func (e *editor) promptSetting(label, current string) (string, bool, error) {
+	var input []byte
+	hasInput := false
+	for {
+		shown := cleanDisplay(strings.ReplaceAll(current, "\n", `\n`))
+		maxShown := max(0, screenCols-len(label)-8)
+		if len(shown) > maxShown {
+			shown = shown[:maxShown]
+		}
+		prompt := fmt.Sprintf("\x1b[%d;1H\x1b[2K%s [%s]: %s\x1b[?25h", screenRows-1, label, shown, cleanDisplay(string(input)))
+		if _, err := io.WriteString(e.conn, prompt); err != nil {
+			return "", false, err
+		}
+		action, value, err := e.reader.readKey()
+		if err != nil {
+			return "", false, err
+		}
+		switch action {
+		case keyEnter:
+			if !hasInput {
+				return current, true, nil
+			}
+			return string(input), true, nil
+		case keyEscape, keyAbort, keyQuit:
+			return "", false, nil
+		case keyBackspace:
+			if len(input) > 0 {
+				input = input[:len(input)-1]
+			}
+			hasInput = true
+		case keyDeleteLine:
+			input = input[:0]
+			hasInput = true
+		case keyOther:
+			if value >= 32 && value != 127 && len(input) < 200 {
+				input = append(input, value)
+				hasInput = true
+			}
+		}
+	}
+}
+
+func (e *editor) editSignature(current string) (string, bool, error) {
+	lines := strings.Split(current, "\n")
+	if current == "" {
+		lines = []string{""}
+	}
+	if len(lines) > maxSignatureLines {
+		lines = lines[:maxSignatureLines]
+	}
+	y, x := len(lines)-1, 0
+	for {
+		top := max(0, len(lines)-maxSignatureLines)
+		var screen strings.Builder
+		fmt.Fprint(&screen, "\x1b[?25l\x1b[2J\x1b[H\x1b[1;44;97m Signature Editor \x1b[K\x1b[0m")
+		fmt.Fprint(&screen, "\x1b[3;1HEnter adds a line; Ctrl-S saves; Escape cancels; Ctrl-Y clears a line")
+		for row := 0; row < maxSignatureLines; row++ {
+			lineIndex := top + row
+			fmt.Fprintf(&screen, "\x1b[%d;1H", row+5)
+			if lineIndex < len(lines) {
+				cursor := -1
+				if lineIndex == y {
+					cursor = x
+				}
+				screen.WriteString(renderBodyLine(lines[lineIndex], cursor))
+			}
+			screen.WriteString("\x1b[K")
+		}
+		fmt.Fprintf(&screen, "\x1b[23;1H Line %d/%d  Col %d\x1b[K", y+1, len(lines), x+1)
+		fmt.Fprintf(&screen, "\x1b[%d;%dH\x1b[?25h", y-top+5, min(x+1, screenCols))
+		if _, err := io.WriteString(e.conn, screen.String()); err != nil {
+			return "", false, err
+		}
+
+		action, value, err := e.reader.readKey()
+		if err != nil {
+			return "", false, err
+		}
+		line := []byte(lines[y])
+		switch action {
+		case keySave:
+			return strings.Join(lines, "\n"), true, nil
+		case keyEscape, keyAbort, keyQuit:
+			return "", false, nil
+		case keyEnter:
+			if len(lines) < maxSignatureLines {
+				lines[y] = string(line[:x])
+				lines = append(lines, "")
+				copy(lines[y+2:], lines[y+1:])
+				lines[y+1] = string(line[x:])
+				y++
+				x = 0
+			}
+		case keyUp:
+			y = max(0, y-1)
+			x = min(x, len(lines[y]))
+		case keyDown:
+			y = min(len(lines)-1, y+1)
+			x = min(x, len(lines[y]))
+		case keyLeft:
+			if x > 0 {
+				x--
+			} else if y > 0 {
+				y--
+				x = len(lines[y])
+			}
+		case keyRight:
+			if x < len(line) {
+				x++
+			} else if y < len(lines)-1 {
+				y++
+				x = 0
+			}
+		case keyHome:
+			x = 0
+		case keyEnd:
+			x = len(line)
+		case keyBackspace:
+			if x > 0 {
+				lines[y] = string(append(line[:x-1], line[x:]...))
+				x--
+			} else if y > 0 {
+				x = len(lines[y-1])
+				lines[y-1] += lines[y]
+				lines = append(lines[:y], lines[y+1:]...)
+				y--
+			}
+		case keyDelete:
+			if x < len(line) {
+				lines[y] = string(append(line[:x], line[x+1:]...))
+			} else if y < len(lines)-1 {
+				lines[y] += lines[y+1]
+				lines = append(lines[:y+1], lines[y+2:]...)
+			}
+		case keyDeleteLine:
+			lines[y] = ""
+			x = 0
+		case keyOther:
+			if value >= 32 && value != 127 && len(line) < screenCols-1 {
+				line = append(line, 0)
+				copy(line[x+1:], line[x:])
+				line[x] = value
+				lines[y] = string(line)
+				x++
+			}
+		}
+	}
 }
 
 func (e *editor) insertQuote() {

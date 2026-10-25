@@ -27,11 +27,13 @@ The other release targets use `GOOS=linux` with `GOARCH=386`, `amd64`, or `arm64
 
 ## Usage
 
-Launch from the BBS node's working directory without a socket option. The editor reads the comm handle from line 2 of `door32.sys`; EleBBS's appended modem/time arguments are ignored. It displays the six positional `msginf` fields (From, To, Subject, message number, area, private flag) and reads or writes only the message body in `msgtmp`; EleBBS owns the header file. Optional settings are read from `eleedit.ini`; quote text is read from `msgquote` when F3 is used. Startup errors are written to `eleedit.log`; errors after socket initialization are also shown to the caller.
+Launch from the BBS node's working directory without a socket option. The editor reads the comm handle from line 2 of `door32.sys`; EleBBS's appended modem/time arguments are ignored. It displays the six positional `msginf` fields (From, To, Subject, message number, area, private flag) and reads or writes only the message body in `msgtmp`; EleBBS owns the header file. Quote text is read from `msgquote` when F3 is used. Startup errors are written to `eleedit.log`; errors after socket initialization are also shown to the caller.
 
-CSI and SS3 arrow sequences move the cursor, Home/End jump within a line, and Page Up/Down scroll. Delete removes the character to the right; Backspace removes the character to the left; Ctrl-Y removes the current line. Enter splits a line unless the whole line is `/s`, `/q`, or `/a`: `/s` saves and exits, `/q` inserts the previous message from `msgquote`, and `/a` exits without saving. F2 or Ctrl-S saves without exiting, F3 inserts quote text, and Ctrl-Q or Escape asks whether to save.
+CSI and SS3 arrow sequences move the cursor, Home/End jump within a line, and Page Up/Down scroll. Delete removes the character to the right; Backspace removes the character to the left; Ctrl-Y removes the current line. Enter splits a line unless the whole line is `/s`, `/q`, `/p`, or `/a`: `/s` saves and exits, `/q` inserts the previous message from `msgquote`, `/p` opens preferences, and `/a` exits without saving. F2 or Ctrl-S saves without exiting, F3 inserts quote text, and Ctrl-Q or Escape asks whether to save.
 
-Configuration keys are `quote_prefix`, `quote_strip`, `quote_all`, `sig_text`, and `sig_append`. Boolean values accept `yes`, `true`, or `1`.
+Enter `/p` on a blank line to set your quote prefix, whether imported quote prefixes are stripped, whether quote prefixes are added to every imported line, and your signature. Boolean prompts accept `yes` or `no`; Enter keeps the current value, Ctrl-Y clears a text field, and Escape cancels without saving. The signature editor supports up to 12 lines; Enter inserts a line, Ctrl-S saves, Escape cancels, and Ctrl-Y clears the current line. The signature is appended to saved messages only when enabled.
+
+Preferences are stored in a user-specific `eleedit-user-<hash>.ini` file in the BBS node's working directory, keyed by the `From` identity in `msginf`.
 
 ## License
 

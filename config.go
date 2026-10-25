@@ -2,6 +2,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -23,8 +26,6 @@ type config struct {
 	Signature signatureConfig
 }
 
-const defaultConfigPath = "eleedit.ini"
-
 func loadConfig(path string) (config, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -35,6 +36,55 @@ func loadConfig(path string) (config, error) {
 	}
 	defer file.Close()
 	return parseConfig(file)
+}
+
+func configPathForUser(username string) string {
+	identity := strings.ToLower(strings.TrimSpace(username))
+	digest := sha256.Sum256([]byte(identity))
+	return "eleedit-user-" + hex.EncodeToString(digest[:]) + ".ini"
+}
+
+func saveConfig(path string, cfg config) error {
+	contents := fmt.Sprintf("quote_prefix = %s\nquote_strip = %s\nquote_all = %s\nsig_text = %s\nsig_append = %s\n",
+		cfg.Quote.Prefix,
+		boolSetting(cfg.Quote.Strip),
+		boolSetting(cfg.Quote.QuoteAll),
+		encodeSignature(cfg.Signature.Text),
+		boolSetting(cfg.Signature.Append),
+	)
+	return os.WriteFile(path, []byte(contents), 0600)
+}
+
+func encodeSignature(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	return strings.ReplaceAll(value, "\n", `\n`)
+}
+
+func decodeSignature(value string) string {
+	var decoded strings.Builder
+	for index := 0; index < len(value); index++ {
+		if value[index] == '\\' && index+1 < len(value) {
+			if value[index+1] == 'n' {
+				decoded.WriteByte('\n')
+				index++
+				continue
+			}
+			if value[index+1] == '\\' {
+				decoded.WriteByte('\\')
+				index++
+				continue
+			}
+		}
+		decoded.WriteByte(value[index])
+	}
+	return decoded.String()
+}
+
+func boolSetting(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
 }
 
 func defaultConfig() config {
@@ -68,7 +118,7 @@ func parseConfig(input io.Reader) (config, error) {
 		case "quote_all":
 			cfg.Quote.QuoteAll = enabled(value)
 		case "sig_text":
-			cfg.Signature.Text = value
+			cfg.Signature.Text = decodeSignature(value)
 		case "sig_append":
 			cfg.Signature.Append = enabled(value)
 		}

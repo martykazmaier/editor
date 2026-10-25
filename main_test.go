@@ -31,6 +31,45 @@ func TestHeadersPreserveAllFields(t *testing.T) {
 	}
 }
 
+func TestParseConfigQuotePreferencesAndSignature(t *testing.T) {
+	cfg, err := parseConfig(strings.NewReader("quote_prefix=|\nquote_strip=no\nquote_all=yes\nsig_text=Regards,\\nMorgan\nsig_append=yes\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Quote.Prefix != "|" || cfg.Quote.Strip || !cfg.Quote.QuoteAll {
+		t.Fatalf("quote config = %#v", cfg.Quote)
+	}
+	if cfg.Signature.Text != "Regards,\nMorgan" || !cfg.Signature.Append {
+		t.Fatalf("signature config = %#v", cfg.Signature)
+	}
+	if got := cfg.appendSignature([]string{"message"}); !reflect.DeepEqual(got, []string{"message", "Regards,", "Morgan"}) {
+		t.Fatalf("appendSignature() = %#v", got)
+	}
+}
+
+func TestUserConfigPathAndSignatureRoundTrip(t *testing.T) {
+	first := configPathForUser("Ada Lovelace")
+	if first == configPathForUser("Grace Hopper") {
+		t.Fatal("different users received the same config path")
+	}
+	if first != configPathForUser(" ada lovelace ") {
+		t.Fatal("config path should be stable across username casing and surrounding spaces")
+	}
+
+	cfg := config{
+		Quote:     quoteConfig{Prefix: "|", Strip: false, QuoteAll: true},
+		Signature: signatureConfig{Text: "Regards,\nAda\\n", Append: true},
+	}
+	path := t.TempDir() + "/" + first
+	if err := saveConfig(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadConfig(path)
+	if err != nil || loaded != cfg {
+		t.Fatalf("loadConfig() = %#v, %v; want %#v", loaded, err, cfg)
+	}
+}
+
 func TestRenderDisplaysHeaderAndVisibleCursor(t *testing.T) {
 	var output bytes.Buffer
 	e := &editor{
@@ -42,7 +81,7 @@ func TestRenderDisplaysHeaderAndVisibleCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"From:      Morgan", "To:        Sysop", "Subject:   Test", "Message #: 42", "Area:      General", "Private:   NO", "\x1b[7ma\x1b[0m", "\x1b[6;1H\x1b[?25h", "/s Save  /q Quote  /a Abort  Ctrl-Y Delete line"} {
+	for _, want := range []string{"From:      Morgan", "To:        Sysop", "Subject:   Test", "Message #: 42", "Area:      General", "Private:   NO", "\x1b[7ma\x1b[0m", "\x1b[6;1H\x1b[?25h", "/s Save  /q Quote  /p Preferences  /a Abort  Ctrl-Y Delete line"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("render output missing %q", want)
 		}
@@ -57,6 +96,51 @@ func TestRenderDisplaysHeaderAndVisibleCursor(t *testing.T) {
 		if len(line) != screenCols {
 			t.Errorf("header row %d is %d columns, want %d", index+1, len(line), screenCols)
 		}
+	}
+}
+
+func TestPreferencesCommandSavesPerUserConfig(t *testing.T) {
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+
+	var output bytes.Buffer
+	input := []byte("!\rno\ryes\rRegards,\rAda\x13yes\r")
+	reader := &keyReader{input: make(chan inputEvent, len(input)), writer: &output}
+	for _, value := range input {
+		reader.input <- inputEvent{b: value}
+	}
+	e := &editor{
+		conn:       &output,
+		reader:     reader,
+		header:     headers{From: "Ada Lovelace"},
+		lines:      []string{"/p", "message"},
+		cfg:        defaultConfig(),
+		configPath: configPathForUser("Ada Lovelace"),
+	}
+	if quit, err := e.handle(keyEnter, 0); err != nil || quit {
+		t.Fatalf("/p result = quit %v, err %v", quit, err)
+	}
+	if e.cfg.Quote.Prefix != "!" || e.cfg.Quote.Strip || !e.cfg.Quote.QuoteAll {
+		t.Fatalf("updated quote preferences = %#v", e.cfg.Quote)
+	}
+	if e.cfg.Signature.Text != "Regards,\nAda" || !e.cfg.Signature.Append {
+		t.Fatalf("updated signature = %#v", e.cfg.Signature)
+	}
+	loaded, err := loadConfig(e.configPath)
+	if err != nil || loaded != e.cfg {
+		t.Fatalf("persisted config = %#v, %v; want %#v", loaded, err, e.cfg)
+	}
+	if _, err := os.Stat(configPathForUser("Grace Hopper")); !os.IsNotExist(err) {
+		t.Fatalf("preferences were not isolated by user; stat error = %v", err)
+	}
+	if !reflect.DeepEqual(e.lines, []string{"message"}) {
+		t.Fatalf("preferences command left lines %#v", e.lines)
 	}
 }
 
