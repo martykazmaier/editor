@@ -544,7 +544,7 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 	case keyF3:
 		e.insertQuote()
 	case keyDeleteLine:
-		e.removeCurrentLine()
+		e.deleteCurrentLine()
 	case keyOther:
 		if value >= 32 && value != 127 {
 			if !e.overtype && len(line) >= screenCols-1 && len(e.lines) >= maxLines {
@@ -896,6 +896,20 @@ func (e *editor) removeCurrentLine() {
 		e.y = len(e.lines) - 1
 	}
 	e.clampX()
+}
+
+// deleteCurrentLine removes the line under the cursor and leaves the cursor
+// on the line that was below it. Repeated Ctrl-Y therefore continues down
+// the message. The last line is cleared in place so the cursor does not
+// climb back through the lines above.
+func (e *editor) deleteCurrentLine() {
+	if e.y < len(e.lines)-1 {
+		e.lines = append(e.lines[:e.y], e.lines[e.y+1:]...)
+		e.clampX()
+		return
+	}
+	e.lines[e.y] = ""
+	e.x = 0
 }
 
 func modeName(overtype bool) string {

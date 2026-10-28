@@ -361,6 +361,20 @@ func TestEditorDeleteBackspaceAndDeleteLine(t *testing.T) {
 	if !reflect.DeepEqual(e.lines, []string{"second"}) || e.y != 0 {
 		t.Fatalf("Ctrl-Y produced %#v at line %d", e.lines, e.y)
 	}
+
+	e.lines = []string{"a", "b", "c", "d"}
+	e.y, e.x = 1, 0
+	e.handle(keyDeleteLine, 0)
+	if !reflect.DeepEqual(e.lines, []string{"a", "c", "d"}) || e.y != 1 {
+		t.Fatalf("Ctrl-Y in the middle produced %#v at line %d", e.lines, e.y)
+	}
+
+	e.lines = []string{"keep", "drop"}
+	e.y, e.x = 1, 2
+	e.handle(keyDeleteLine, 0)
+	if !reflect.DeepEqual(e.lines, []string{"keep", ""}) || e.y != 1 || e.x != 0 {
+		t.Fatalf("Ctrl-Y on the last line produced %#v at line %d col %d", e.lines, e.y, e.x)
+	}
 }
 
 func TestSlashCommands(t *testing.T) {
