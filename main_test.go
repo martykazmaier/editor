@@ -283,6 +283,20 @@ func TestWriteBodyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestKeyReaderBackspaceAndDelete(t *testing.T) {
+	reader := &keyReader{input: make(chan inputEvent, 2)}
+	reader.input <- inputEvent{b: 0x08}
+	reader.input <- inputEvent{b: 0x7f}
+	got, _, err := reader.readKey()
+	if err != nil || got != keyBackspace {
+		t.Fatalf("readKey(BS) = %v, %v; want Backspace", got, err)
+	}
+	got, _, err = reader.readKey()
+	if err != nil || got != keyDelete {
+		t.Fatalf("readKey(DEL) = %v, %v; want Delete", got, err)
+	}
+}
+
 func TestKeyReaderArrowSequences(t *testing.T) {
 	reader := &keyReader{input: make(chan inputEvent, 6)}
 	for _, value := range []byte{0x1b, '[', 'A', 0x1b, 'O', 'D'} {

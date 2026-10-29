@@ -139,8 +139,10 @@ func (r *keyReader) readKey() (key, byte, error) {
 			}
 		}
 		return decodeSequence(sequence), 0, nil
-	case 0x08, 0x7f:
+	case 0x08:
 		return keyBackspace, 0, nil
+	case 0x7f:
+		return keyDelete, 0, nil
 	case '\r', '\n':
 		return keyEnter, 0, nil
 	case 0x13:
