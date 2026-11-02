@@ -577,6 +577,9 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 			if len(line) >= screenCols && !e.overtype {
 				e.wrapCurrentLine(line)
 			}
+			if quit, err := e.iceSlash(); quit || err != nil {
+				return quit, err
+			}
 		}
 	}
 	return false, nil
@@ -602,6 +605,52 @@ func (e *editor) wrapCurrentLine(line []byte) {
 		e.y++
 		e.x -= nextStart
 	}
+}
+
+// iceSlash runs /s and /a the moment they are typed in the first two columns,
+// matching IceEdit. Enter is not required. Declining removes those two characters.
+func (e *editor) iceSlash() (bool, error) {
+	if e.x != 2 {
+		return false, nil
+	}
+	current := e.lines[e.y]
+	if len(current) < 2 {
+		return false, nil
+	}
+	command := strings.ToLower(current[:2])
+	if command != "/s" && command != "/a" {
+		return false, nil
+	}
+	rest := current[2:]
+	confirmed, err := e.confirmSlash(command)
+	if err != nil || !confirmed {
+		if err == nil {
+			e.lines[e.y] = rest
+			e.x = 0
+		}
+		return false, err
+	}
+	if command == "/a" {
+		return true, e.discard()
+	}
+	if strings.TrimSpace(rest) == "" {
+		e.removeCurrentLine()
+	} else {
+		e.lines[e.y] = rest
+	}
+	if err := e.save(); err != nil {
+		e.status = "Save failed: " + err.Error()
+		return false, nil
+	}
+	return true, nil
+}
+
+func (e *editor) confirmSlash(command string) (bool, error) {
+	prompt := "Save message?  Y=Yes  Any other key=Continue"
+	if command == "/a" {
+		prompt = "Abort message?  Y=Yes  Any other key=Continue"
+	}
+	return e.confirm(prompt)
 }
 
 func slashCommand(line string) (command, rest string) {

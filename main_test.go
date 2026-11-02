@@ -391,6 +391,64 @@ func TestEditorDeleteBackspaceAndDeleteLine(t *testing.T) {
 	}
 }
 
+func TestSlashCommandsRunWhenTyped(t *testing.T) {
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	if err := writeBody(bodyFile, []string{"unchanged"}); err != nil {
+		t.Fatal(err)
+	}
+
+	save := &editor{conn: &bytes.Buffer{}, reader: keyReaderWith('n'), lines: []string{"", "kept"}}
+	if quit, err := save.handle(keyOther, '/'); err != nil || quit {
+		t.Fatalf("typing / = quit %v, err %v", quit, err)
+	}
+	if quit, err := save.handle(keyOther, 's'); err != nil || quit {
+		t.Fatalf("declined typed /s = quit %v, err %v", quit, err)
+	}
+	if save.lines[0] != "" || save.x != 0 {
+		t.Fatalf("declined typed /s left %#v at column %d", save.lines, save.x)
+	}
+	if got, err := readBody(bodyFile); err != nil || !reflect.DeepEqual(got, []string{"unchanged"}) {
+		t.Fatalf("declined typed /s saved %#v, err %v", got, err)
+	}
+
+	save.reader = keyReaderWith('Y')
+	if quit, err := save.handle(keyOther, '/'); err != nil || quit {
+		t.Fatalf("typing / again = quit %v, err %v", quit, err)
+	}
+	if quit, err := save.handle(keyOther, 's'); err != nil || !quit {
+		t.Fatalf("typed /s = quit %v, err %v", quit, err)
+	}
+	if got, err := readBody(bodyFile); err != nil || !reflect.DeepEqual(got, []string{"kept"}) {
+		t.Fatalf("typed /s saved %#v, err %v", got, err)
+	}
+
+	abort := &editor{conn: &bytes.Buffer{}, reader: keyReaderWith('y'), lines: []string{"hello"}}
+	if _, err := abort.handle(keyOther, '/'); err != nil {
+		t.Fatal(err)
+	}
+	if quit, err := abort.handle(keyOther, 'a'); err != nil || !quit {
+		t.Fatalf("typed /a = quit %v, err %v", quit, err)
+	}
+	if _, err := os.Stat(bodyFile); !os.IsNotExist(err) {
+		t.Fatalf("typed /a left msgtmp present, stat err %v", err)
+	}
+
+	plain := &editor{lines: []string{"hello"}, x: len("hello")}
+	if quit, err := plain.handle(keyOther, '/'); err != nil || quit {
+		t.Fatalf("slash in the line = quit %v, err %v", quit, err)
+	}
+	if quit, err := plain.handle(keyOther, 's'); err != nil || quit || plain.lines[0] != "hello/s" {
+		t.Fatalf("slash in the line produced quit %v %#v", quit, plain.lines)
+	}
+}
+
 func keyReaderWith(value byte) *keyReader {
 	reader := &keyReader{input: make(chan inputEvent, 1)}
 	reader.input <- inputEvent{b: value}
