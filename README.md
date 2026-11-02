@@ -33,7 +33,7 @@ CSI and SS3 arrow sequences move the cursor, Home/End jump within a line, and Pa
 
 Enter `/p` on a blank line to set your quote prefix, whether imported quote prefixes are stripped, whether quote prefixes are added to every imported line, and your signature. Boolean prompts accept `yes` or `no`; Enter keeps the current value, Ctrl-Y clears a text field, and Escape cancels without saving. The signature editor supports up to 12 lines; Enter inserts a line, Ctrl-S saves, Escape cancels, and Ctrl-Y clears the current line. The signature is appended to saved messages only when enabled.
 
-Preferences are stored in a user-specific `eleedit-user-<hash>.ini` file in the BBS node's working directory, keyed by the `From` identity in `msginf`.
+Preferences for every caller are stored in one `eleedit.ini` file in the same directory as the editor program. Each caller's settings are kept under the user name from line 6 of `door32.sys`.
 
 ## License
 

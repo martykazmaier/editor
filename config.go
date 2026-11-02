@@ -2,11 +2,11 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -38,21 +38,133 @@ func loadConfig(path string) (config, error) {
 	return parseConfig(file)
 }
 
-func configPathForUser(username string) string {
-	identity := strings.ToLower(strings.TrimSpace(username))
-	digest := sha256.Sum256([]byte(identity))
-	return "eleedit-user-" + hex.EncodeToString(digest[:]) + ".ini"
+// preferencesFile is the one preferences file, kept beside this program so it
+// stays put when the caller changes nodes.
+func preferencesFile() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return filepath.Join(filepath.Dir(exe), "eleedit.ini"), nil
 }
 
-func saveConfig(path string, cfg config) error {
-	contents := fmt.Sprintf("quote_prefix = %s\nquote_strip = %s\nquote_all = %s\nsig_text = %s\nsig_append = %s\n",
+func userSection(username string) string {
+	name := strings.ToLower(strings.TrimSpace(username))
+	name = strings.NewReplacer("\r", " ", "\n", " ", "]", "_").Replace(name)
+	return strings.TrimSpace(name)
+}
+
+func formatConfig(cfg config) string {
+	return fmt.Sprintf("quote_prefix = %s\nquote_strip = %s\nquote_all = %s\nsig_text = %s\nsig_append = %s\n",
 		cfg.Quote.Prefix,
 		boolSetting(cfg.Quote.Strip),
 		boolSetting(cfg.Quote.QuoteAll),
 		encodeSignature(cfg.Signature.Text),
 		boolSetting(cfg.Signature.Append),
 	)
-	return os.WriteFile(path, []byte(contents), 0600)
+}
+
+func loadUserConfig(path, username string) (config, error) {
+	users, err := loadAllUsers(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultConfig(), nil
+		}
+		return config{}, err
+	}
+	cfg, ok := users[userSection(username)]
+	if !ok {
+		return defaultConfig(), nil
+	}
+	return cfg, nil
+}
+
+func saveUserConfig(path, username string, cfg config) error {
+	section := userSection(username)
+	if section == "" {
+		return fmt.Errorf("user name is blank")
+	}
+	users, err := loadAllUsers(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if users == nil {
+		users = map[string]config{}
+	}
+	users[section] = cfg
+	return writeAllUsers(path, users)
+}
+
+func loadAllUsers(path string) (map[string]config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	users := map[string]config{}
+	scanner := bufio.NewScanner(file)
+	section := ""
+	var body strings.Builder
+	flush := func() error {
+		if section == "" {
+			return nil
+		}
+		cfg, err := parseConfig(strings.NewReader(body.String()))
+		if err != nil {
+			return err
+		}
+		users[section] = cfg
+		return nil
+	}
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+			section = userSection(line[1 : len(line)-1])
+			body.Reset()
+			continue
+		}
+		if section == "" {
+			continue
+		}
+		body.WriteString(scanner.Text())
+		body.WriteByte('\n')
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func writeAllUsers(path string, users map[string]config) error {
+	names := make([]string, 0, len(users))
+	for name := range users {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var contents strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&contents, "[%s]\n%s", name, formatConfig(users[name]))
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, []byte(contents.String()), 0600); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(temporary, path)
 }
 
 func encodeSignature(value string) string {

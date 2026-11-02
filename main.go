@@ -27,6 +27,7 @@ type editor struct {
 	conn       stream
 	reader     *keyReader
 	header     headers
+	userName   string
 	lines      []string
 	cfg        config
 	configPath string
@@ -280,7 +281,7 @@ func main() {
 }
 
 func run() error {
-	value, err := readDoor32Socket("door32.sys")
+	value, userName, err := readDoor32("door32.sys")
 	if err != nil {
 		return err
 	}
@@ -292,8 +293,11 @@ func run() error {
 	if err != nil {
 		return reportSocketError(conn, fmt.Errorf("read headers: %w", err))
 	}
-	configPath := configPathForUser(header.From)
-	cfg, err := loadConfig(configPath)
+	configPath, err := preferencesFile()
+	if err != nil {
+		return reportSocketError(conn, fmt.Errorf("read config: %w", err))
+	}
+	cfg, err := loadUserConfig(configPath, userName)
 	if err != nil {
 		return reportSocketError(conn, fmt.Errorf("read config: %w", err))
 	}
@@ -307,7 +311,7 @@ func run() error {
 	if len(lines) == 0 {
 		lines = []string{""}
 	}
-	e := &editor{conn: conn, reader: newKeyReader(conn), header: header, lines: lines, cfg: cfg, configPath: configPath, status: "Ready"}
+	e := &editor{conn: conn, reader: newKeyReader(conn), header: header, userName: userName, lines: lines, cfg: cfg, configPath: configPath, status: "Ready"}
 	return e.run()
 }
 
@@ -723,7 +727,7 @@ func (e *editor) save() error {
 }
 
 func (e *editor) configure() {
-	if strings.TrimSpace(e.header.From) == "" {
+	if strings.TrimSpace(e.userName) == "" {
 		e.status = "Cannot save preferences without a user name"
 		return
 	}
@@ -769,7 +773,7 @@ func (e *editor) configure() {
 		e.status = "Preferences unchanged"
 		return
 	}
-	if err := saveConfig(e.configPath, updated); err != nil {
+	if err := saveUserConfig(e.configPath, e.userName, updated); err != nil {
 		e.status = "Preferences not saved: " + err.Error()
 		return
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,12 +11,13 @@ import (
 
 func TestDoor32SocketIsReadForEditorStartup(t *testing.T) {
 	path := t.TempDir() + `/door32.sys`
-	if err := os.WriteFile(path, []byte("2\r\n9876\r\n9600\r\n"), 0600); err != nil {
+	contents := "2\r\n9876\r\n9600\r\nEleBBS\r\n12\r\nAda Lovelace\r\nAda\r\n"
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
-	handle, err := readDoor32Socket(path)
-	if err != nil || handle != 9876 {
-		t.Fatalf("readDoor32Socket() = %d, %v; want 9876", handle, err)
+	handle, userName, err := readDoor32(path)
+	if err != nil || handle != 9876 || userName != "Ada Lovelace" {
+		t.Fatalf("readDoor32() = %d, %q, %v; want 9876, Ada Lovelace", handle, userName, err)
 	}
 }
 
@@ -47,26 +49,47 @@ func TestParseConfigQuotePreferencesAndSignature(t *testing.T) {
 	}
 }
 
-func TestUserConfigPathAndSignatureRoundTrip(t *testing.T) {
-	first := configPathForUser("Ada Lovelace")
-	if first == configPathForUser("Grace Hopper") {
-		t.Fatal("different users received the same config path")
+func TestPreferencesFileSitsBesideExecutable(t *testing.T) {
+	path, err := preferencesFile()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if first != configPathForUser(" ada lovelace ") {
-		t.Fatal("config path should be stable across username casing and surrounding spaces")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	if filepath.Clean(path) != filepath.Join(filepath.Dir(exe), "eleedit.ini") {
+		t.Fatalf("preferencesFile() = %q", path)
+	}
+}
 
-	cfg := config{
+func TestOnePreferencesFileKeepsEachUser(t *testing.T) {
+	path := t.TempDir() + "/eleedit.ini"
+	ada := config{
 		Quote:     quoteConfig{Prefix: "|", Strip: false, QuoteAll: true},
 		Signature: signatureConfig{Text: "Regards,\nAda\\n", Append: true},
 	}
-	path := t.TempDir() + "/" + first
-	if err := saveConfig(path, cfg); err != nil {
+	grace := defaultConfig()
+	grace.Quote.Prefix = ">"
+	if err := saveUserConfig(path, "Ada Lovelace", ada); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := loadConfig(path)
-	if err != nil || loaded != cfg {
-		t.Fatalf("loadConfig() = %#v, %v; want %#v", loaded, err, cfg)
+	if err := saveUserConfig(path, "Grace Hopper", grace); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadUserConfig(path, " ada lovelace ")
+	if err != nil || loaded != ada {
+		t.Fatalf("Ada config = %#v, %v", loaded, err)
+	}
+	loaded, err = loadUserConfig(path, "Grace Hopper")
+	if err != nil || loaded != grace {
+		t.Fatalf("Grace config = %#v, %v", loaded, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -119,9 +142,10 @@ func TestPreferencesCommandSavesPerUserConfig(t *testing.T) {
 		conn:       &output,
 		reader:     reader,
 		header:     headers{From: "Ada Lovelace"},
+		userName:   "Ada Lovelace",
 		lines:      []string{"/p", "message"},
 		cfg:        defaultConfig(),
-		configPath: configPathForUser("Ada Lovelace"),
+		configPath: "eleedit.ini",
 	}
 	if quit, err := e.handle(keyEnter, 0); err != nil || quit {
 		t.Fatalf("/p result = quit %v, err %v", quit, err)
@@ -132,12 +156,12 @@ func TestPreferencesCommandSavesPerUserConfig(t *testing.T) {
 	if e.cfg.Signature.Text != "Regards,\nAda" || !e.cfg.Signature.Append {
 		t.Fatalf("updated signature = %#v", e.cfg.Signature)
 	}
-	loaded, err := loadConfig(e.configPath)
+	loaded, err := loadUserConfig(e.configPath, "Ada Lovelace")
 	if err != nil || loaded != e.cfg {
 		t.Fatalf("persisted config = %#v, %v; want %#v", loaded, err, e.cfg)
 	}
-	if _, err := os.Stat(configPathForUser("Grace Hopper")); !os.IsNotExist(err) {
-		t.Fatalf("preferences were not isolated by user; stat error = %v", err)
+	if _, err := os.Stat("eleedit-ada lovelace.ini"); !os.IsNotExist(err) {
+		t.Fatalf("preferences were written to a per-user file; stat error = %v", err)
 	}
 	if !reflect.DeepEqual(e.lines, []string{"message"}) {
 		t.Fatalf("preferences command left lines %#v", e.lines)
