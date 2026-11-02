@@ -507,9 +507,17 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 			e.lines = append(e.lines[:e.y+1], e.lines[e.y+2:]...)
 		}
 	case keyEnter:
-		switch strings.ToLower(strings.TrimSpace(e.lines[e.y])) {
+		switch command, rest := slashCommand(e.lines[e.y]); command {
 		case "/s":
-			e.removeCurrentLine()
+			confirmed, err := e.confirm("Save message?  Y=Yes  Any other key=Continue")
+			if err != nil || !confirmed {
+				return false, err
+			}
+			if rest == "" {
+				e.removeCurrentLine()
+			} else {
+				e.lines[e.y] = rest
+			}
 			if err := e.save(); err != nil {
 				e.status = "Save failed: " + err.Error()
 				return false, nil
@@ -524,6 +532,10 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 			e.configure()
 			return false, nil
 		case "/a":
+			confirmed, err := e.confirm("Abort message?  Y=Yes  Any other key=Continue")
+			if err != nil || !confirmed {
+				return false, err
+			}
 			return true, e.discard()
 		}
 		if len(e.lines) >= maxLines {
@@ -590,6 +602,39 @@ func (e *editor) wrapCurrentLine(line []byte) {
 		e.y++
 		e.x -= nextStart
 	}
+}
+
+func slashCommand(line string) (command, rest string) {
+	trimmed := strings.TrimSpace(line)
+	if len(trimmed) < 2 || trimmed[0] != '/' {
+		return "", ""
+	}
+	end := 0
+	for end < len(trimmed) && trimmed[end] != ' ' && trimmed[end] != '\t' {
+		end++
+	}
+	command = strings.ToLower(trimmed[:end])
+	rest = strings.TrimSpace(trimmed[end:])
+	switch command {
+	case "/s", "/a":
+		return command, rest
+	case "/q", "/p":
+		if rest == "" {
+			return command, ""
+		}
+	}
+	return "", ""
+}
+
+func (e *editor) confirm(prompt string) (bool, error) {
+	if _, err := io.WriteString(e.conn, "\x1b[23;1H\x1b[7m "+prompt+" \x1b[K\x1b[0m"); err != nil {
+		return false, err
+	}
+	choice, value, err := e.reader.readKey()
+	if err != nil {
+		return false, err
+	}
+	return choice == keyOther && (value == 'y' || value == 'Y'), nil
 }
 
 func (e *editor) quitPrompt() (bool, error) {

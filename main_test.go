@@ -391,6 +391,12 @@ func TestEditorDeleteBackspaceAndDeleteLine(t *testing.T) {
 	}
 }
 
+func keyReaderWith(value byte) *keyReader {
+	reader := &keyReader{input: make(chan inputEvent, 1)}
+	reader.input <- inputEvent{b: value}
+	return reader
+}
+
 func TestSlashCommands(t *testing.T) {
 	previous, err := os.Getwd()
 	if err != nil {
@@ -421,6 +427,15 @@ func TestSlashCommands(t *testing.T) {
 	}
 	save.lines = []string{"/s", "saved body"}
 	save.y = 0
+	save.conn = &bytes.Buffer{}
+	save.reader = keyReaderWith('n')
+	if quit, err := save.handle(keyEnter, 0); err != nil || quit {
+		t.Fatalf("/s declined result = quit %v, err %v", quit, err)
+	}
+	if got, err := readBody(bodyFile); err != nil || !reflect.DeepEqual(got, []string{"unchanged"}) {
+		t.Fatalf("/s declined saved %#v, err %v", got, err)
+	}
+	save.reader = keyReaderWith('Y')
 	if quit, err := save.handle(keyEnter, 0); err != nil || !quit {
 		t.Fatalf("/s result = quit %v, err %v", quit, err)
 	}
@@ -429,11 +444,32 @@ func TestSlashCommands(t *testing.T) {
 		t.Fatalf("/s saved %#v, err %v", got, err)
 	}
 
+	prefixed := &editor{
+		conn:   &bytes.Buffer{},
+		reader: keyReaderWith('y'),
+		lines:  []string{"/s Keep this", "next"},
+	}
+	if quit, err := prefixed.handle(keyEnter, 0); err != nil || !quit {
+		t.Fatalf("/s prefix result = quit %v, err %v", quit, err)
+	}
+	if got, err := readBody(bodyFile); err != nil || !reflect.DeepEqual(got, []string{"Keep this", "next"}) {
+		t.Fatalf("/s prefix saved %#v, err %v", got, err)
+	}
+
 	abort := &editor{lines: []string{"changed body"}}
 	if err := abort.save(); err != nil {
 		t.Fatal(err)
 	}
 	abort.lines = []string{"/a"}
+	abort.conn = &bytes.Buffer{}
+	abort.reader = keyReaderWith('n')
+	if quit, err := abort.handle(keyEnter, 0); err != nil || quit {
+		t.Fatalf("/a declined result = quit %v, err %v", quit, err)
+	}
+	if _, err := os.Stat(bodyFile); err != nil {
+		t.Fatalf("/a declined removed msgtmp, stat err %v", err)
+	}
+	abort.reader = keyReaderWith('y')
 	if quit, err := abort.handle(keyEnter, 0); err != nil || !quit {
 		t.Fatalf("/a result = quit %v, err %v", quit, err)
 	}
