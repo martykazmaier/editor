@@ -104,7 +104,7 @@ func TestRenderDisplaysHeaderAndVisibleCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"From:      Morgan", "To:        Sysop", "Subject:   Test", "Message #: 42", "Area:      General", "Private:   NO", "\x1b[7ma\x1b[0m", "\x1b[6;1H\x1b[?25h", "/s Save  /q Quote  /p Preferences  /a Abort  Ctrl-Y Delete line"} {
+	for _, want := range []string{"From:      Morgan", "To:        Sysop", "Subject:   Test", "Message #: 42", "Area:      General", "Private:   NO", "\x1b[7ma\x1b[27m", "\x1b[6;1H\x1b[?25h", "/s Save  /q Quote  /p Preferences  /a Abort  Ctrl-Y Delete line"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("render output missing %q", want)
 		}
@@ -580,5 +580,35 @@ func TestSlashCommands(t *testing.T) {
 	}
 	if _, err := os.Stat(bodyFile); !os.IsNotExist(err) {
 		t.Fatalf("Escape-N left msgtmp present, stat err %v", err)
+	}
+}
+
+func TestPipeColorIsShownAndKeptOutOfTheColumnCount(t *testing.T) {
+	rendered, attr := renderBodyLine("|0FHi", -1, 7)
+	if attr != 0x0F || strings.Contains(rendered, "|0F") || !strings.Contains(rendered, "Hi") {
+		t.Fatalf("renderBodyLine() = %q, attr %#x", rendered, attr)
+	}
+	if !strings.Contains(rendered, "\x1b[0;97;40m") {
+		t.Fatalf("bright white sequence missing in %q", rendered)
+	}
+	if visualColumn("|0FHi", len("|0FHi")) != 2 {
+		t.Fatalf("visual width = %d", visualColumn("|0FHi", len("|0FHi")))
+	}
+	colored := "|0A" + strings.Repeat("a", 5) + "|1Eb"
+	if byteIndexAtColumn(colored, 5) != strings.Index(colored, "b") {
+		t.Fatalf("column of b = %d", byteIndexAtColumn(colored, 5))
+	}
+	plain, _ := renderBodyLine("|0", -1, 7)
+	if !strings.Contains(plain, "|0") {
+		t.Fatalf("incomplete code was hidden: %q", plain)
+	}
+}
+
+func TestColorCodesDoNotShortenTheVisibleLine(t *testing.T) {
+	line := "|0F" + strings.Repeat("a", screenCols)
+	e := &editor{lines: []string{line}, x: len(line)}
+	e.wrapCurrentLine([]byte(line))
+	if e.lines[0] != "|0F"+strings.Repeat("a", screenCols-1) || e.lines[1] != "a" {
+		t.Fatalf("wrapped colored line = %#v", e.lines)
 	}
 }

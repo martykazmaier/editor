@@ -31,6 +31,8 @@ Launch from the BBS node's working directory without a socket option. The editor
 
 CSI and SS3 arrow sequences move the cursor, Home/End jump within a line, and Page Up/Down scroll. Delete removes the character to the right; Backspace removes the character to the left; Ctrl-Y removes the current line. Typing `/s` or `/a` in the first two columns asks for confirmation immediately, without Enter: Y saves and exits, or aborts without saving, and any other key cancels. Enter still runs `/q` and `/p` when that is the whole line: `/q` inserts the previous message from `msgquote`, and `/p` opens preferences. Enter otherwise splits a line. F2 or Ctrl-S saves without exiting, F3 inserts quote text, and Ctrl-Q or Escape asks whether to save.
 
+A message can use EleBBS color codes: a `|` and two hexadecimal digits, such as `|0F` for bright white or `|1E` for yellow on blue. The editor shows the color and saves the code with the message. ANSI color sequences already in the text are shown the same way. Color carries down the message until the next code.
+
 Enter `/p` on a blank line to set your quote prefix, whether imported quote prefixes are stripped, whether quote prefixes are added to every imported line, and your signature. Boolean prompts accept `yes` or `no`; Enter keeps the current value, Ctrl-Y clears a text field, and Escape cancels without saving. The signature editor supports up to 12 lines; Enter inserts a line, Ctrl-S saves, Escape cancels, and Ctrl-Y clears the current line. The signature is appended to saved messages only when enabled.
 
 Preferences for every caller are stored in one `eleedit.ini` file in the same directory as the editor program. Each caller's settings are kept under the user name from line 6 of `door32.sys`.

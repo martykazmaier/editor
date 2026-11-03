@@ -377,22 +377,26 @@ func (e *editor) render() error {
 	separatorRow := len(headerLines) + 2
 	fmt.Fprintf(&b, "\x1b[%d;1H%s", separatorRow, strings.Repeat("-", screenCols))
 	bodyStartRow := separatorRow + 1
+	attr := byte(7)
+	var rendered string
 	for row := 0; row < visibleRows; row++ {
 		lineIndex := e.top + row
 		fmt.Fprintf(&b, "\x1b[%d;1H", bodyStartRow+row)
 		if lineIndex < len(e.lines) {
-			cursorColumn := -1
+			cursorIndex := -1
 			if lineIndex == e.y {
-				cursorColumn = min(e.x, screenCols-1)
+				cursorIndex = e.x
 			}
-			fmt.Fprint(&b, renderBodyLine(e.lines[lineIndex], cursorColumn))
+			rendered, attr = renderBodyLine(e.lines[lineIndex], cursorIndex, attr)
+			fmt.Fprint(&b, rendered)
 		}
-		fmt.Fprint(&b, "\x1b[K")
+		fmt.Fprint(&b, "\x1b[0m\x1b[K")
 	}
-	fmt.Fprintf(&b, "\x1b[%d;1H\x1b[7m Line %4d/%-4d  Col %2d  %s  %-45.45s \x1b[K\x1b[0m", screenRows-1, e.y+1, len(e.lines), e.x+1, modeName(e.overtype), cleanDisplay(e.status))
+	column := visualColumn(e.lines[e.y], e.x) + 1
+	fmt.Fprintf(&b, "\x1b[%d;1H\x1b[7m Line %4d/%-4d  Col %2d  %s  %-45.45s \x1b[K\x1b[0m", screenRows-1, e.y+1, len(e.lines), column, modeName(e.overtype), cleanDisplay(e.status))
 	fmt.Fprintf(&b, "\x1b[%d;1H /s Save  /q Quote  /p Preferences  /a Abort  Ctrl-Y Delete line\x1b[K", screenRows)
 	row := bodyStartRow + e.y - e.top
-	fmt.Fprintf(&b, "\x1b[%d;%dH\x1b[?25h", row, min(e.x+1, screenCols))
+	fmt.Fprintf(&b, "\x1b[%d;%dH\x1b[?25h", row, min(column, screenCols))
 	_, err := io.WriteString(e.conn, b.String())
 	return err
 }
@@ -419,26 +423,46 @@ func headerDisplayValue(value string) string {
 	return value
 }
 
-func renderBodyLine(line string, cursorColumn int) string {
+func renderBodyLine(line string, cursorIndex int, attr byte) (string, byte) {
 	var b strings.Builder
-	limit := min(len(line), screenCols)
-	for column := 0; column < limit; column++ {
-		if column == cursorColumn {
-			b.WriteString("\x1b[7m")
+	b.WriteString(ansiForAttr(attr))
+	column := 0
+	drewCursor := false
+	for index := 0; index < len(line) && column < screenCols; {
+		if value, ok := pipeAttr(line, index); ok {
+			attr = value
+			b.WriteString(ansiForAttr(attr))
+			index += 3
+			continue
 		}
-		if line[column] < 32 || line[column] == 127 {
+		if sequence, width, ok := sgrSequence(line, index); ok {
+			b.WriteString(sequence)
+			index += width
+			continue
+		}
+		if width := csiWidth(line, index); width > 0 {
+			index += width
+			continue
+		}
+		if index == cursorIndex {
+			b.WriteString("\x1b[7m")
+			drewCursor = true
+		}
+		if line[index] < 32 || line[index] == 127 {
 			b.WriteByte(' ')
 		} else {
-			b.WriteByte(line[column])
+			b.WriteByte(line[index])
 		}
-		if column == cursorColumn {
-			b.WriteString("\x1b[0m")
+		if index == cursorIndex {
+			b.WriteString("\x1b[27m")
 		}
+		column++
+		index++
 	}
-	if cursorColumn >= limit && cursorColumn >= 0 && cursorColumn < screenCols {
-		b.WriteString("\x1b[7m \x1b[0m")
+	if cursorIndex >= 0 && !drewCursor && column < screenCols && visualColumn(line, cursorIndex) >= column {
+		b.WriteString("\x1b[7m \x1b[27m")
 	}
-	return b.String()
+	return b.String(), attr
 }
 
 func (e *editor) handle(action key, value byte) (bool, error) {
@@ -565,7 +589,7 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 		e.deleteCurrentLine()
 	case keyOther:
 		if value >= 32 && value != 127 {
-			if !e.overtype && len(line) >= screenCols-1 && len(e.lines) >= maxLines {
+			if !e.overtype && visibleWidth(string(line)) >= screenCols-1 && len(e.lines) >= maxLines {
 				e.status = "Maximum line count reached"
 				break
 			}
@@ -578,7 +602,7 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 			}
 			e.lines[e.y] = string(line)
 			e.x++
-			if len(line) >= screenCols && !e.overtype {
+			if visibleWidth(string(line)) >= screenCols && !e.overtype {
 				e.wrapCurrentLine(line)
 			}
 			if quit, err := e.iceSlash(); quit || err != nil {
@@ -590,9 +614,13 @@ func (e *editor) handle(action key, value byte) (bool, error) {
 }
 
 func (e *editor) wrapCurrentLine(line []byte) {
-	breakAt := screenCols - 1
+	text := string(line)
+	breakAt := byteIndexAtColumn(text, screenCols-1)
 	for index := breakAt; index > 0; index-- {
-		if line[index] == ' ' {
+		if hiddenWidth(text, index) > 0 {
+			continue
+		}
+		if text[index] == ' ' {
 			breakAt = index
 			break
 		}
@@ -855,6 +883,7 @@ func (e *editor) editSignature(current string) (string, bool, error) {
 		var screen strings.Builder
 		fmt.Fprint(&screen, "\x1b[?25l\x1b[2J\x1b[H\x1b[1;44;97m Signature Editor \x1b[K\x1b[0m")
 		fmt.Fprint(&screen, "\x1b[3;1HEnter adds a line; Ctrl-S saves; Escape cancels; Ctrl-Y clears a line")
+		attr := byte(7)
 		for row := 0; row < maxSignatureLines; row++ {
 			lineIndex := top + row
 			fmt.Fprintf(&screen, "\x1b[%d;1H", row+5)
@@ -863,12 +892,15 @@ func (e *editor) editSignature(current string) (string, bool, error) {
 				if lineIndex == y {
 					cursor = x
 				}
-				screen.WriteString(renderBodyLine(lines[lineIndex], cursor))
+				rendered, next := renderBodyLine(lines[lineIndex], cursor, attr)
+				attr = next
+				screen.WriteString(rendered)
 			}
-			screen.WriteString("\x1b[K")
+			screen.WriteString("\x1b[0m\x1b[K")
 		}
-		fmt.Fprintf(&screen, "\x1b[23;1H Line %d/%d  Col %d\x1b[K", y+1, len(lines), x+1)
-		fmt.Fprintf(&screen, "\x1b[%d;%dH\x1b[?25h", y-top+5, min(x+1, screenCols))
+		column := visualColumn(lines[y], x) + 1
+		fmt.Fprintf(&screen, "\x1b[23;1H Line %d/%d  Col %d\x1b[K", y+1, len(lines), column)
+		fmt.Fprintf(&screen, "\x1b[%d;%dH\x1b[?25h", y-top+5, min(column, screenCols))
 		if _, err := io.WriteString(e.conn, screen.String()); err != nil {
 			return "", false, err
 		}
@@ -937,7 +969,7 @@ func (e *editor) editSignature(current string) (string, bool, error) {
 			lines[y] = ""
 			x = 0
 		case keyOther:
-			if value >= 32 && value != 127 && len(line) < screenCols-1 {
+			if value >= 32 && value != 127 && visibleWidth(string(line)) < screenCols-1 {
 				line = append(line, 0)
 				copy(line[x+1:], line[x:])
 				line[x] = value
